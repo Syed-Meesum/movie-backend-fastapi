@@ -1,11 +1,16 @@
 import os
+import re
+import numpy as np
+import faiss
 from datetime import datetime, timedelta
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
+# ------------------ SETUP ------------------
 load_dotenv()
 
 app = FastAPI(title="Movie Streaming Platform API")
@@ -21,7 +26,10 @@ users_col = db.users
 watch_col = db.watch_history
 reviews_col = db.reviews
 
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # lightweight, fast embedding model
 
+
+# ------------------ MODELS ------------------
 class Movie(BaseModel):
     title: str
     release_year: int
@@ -52,6 +60,10 @@ class WatchEventIn(BaseModel):
     watch_duration_seconds: int = 0
 
 
+@app.get("/")
+def show():
+    return {"movie-streaming"}
+# ------------------ SEED DATA ------------------
 @app.post("/seed")
 async def seed_data():
     await movies_col.delete_many({})
@@ -60,12 +72,28 @@ async def seed_data():
     await reviews_col.delete_many({})
 
     movies = [
-        {"title": "The Godfather", "release_year": 1972, "genres": ["Crime", "Drama"], "cast": ["Marlon Brando", "Al Pacino"], "director": "Francis Ford Coppola", "rating": 9.2, "watch_count": 0},
-        {"title": "Inception", "release_year": 2010, "genres": ["Action", "Sci-Fi"], "cast": ["Leonardo DiCaprio"], "director": "Christopher Nolan", "rating": 8.8, "watch_count": 0},
-        {"title": "Titanic", "release_year": 1997, "genres": ["Romance", "Drama"], "cast": ["Leonardo DiCaprio", "Kate Winslet"], "director": "James Cameron", "rating": 7.8, "watch_count": 0},
-        {"title": "Interstellar", "release_year": 2014, "genres": ["Adventure", "Sci-Fi"], "cast": ["Matthew McConaughey"], "director": "Christopher Nolan", "rating": 8.6, "watch_count": 0},
-        {"title": "The Dark Knight", "release_year": 2008, "genres": ["Action", "Crime"], "cast": ["Christian Bale", "Heath Ledger"], "director": "Christopher Nolan", "rating": 9.0, "watch_count": 0},
+        {"title": "The Godfather", "release_year": 1972, "genres": ["Crime", "Drama"],
+         "cast": ["Marlon Brando", "Al Pacino"], "director": "Francis Ford Coppola",
+         "rating": 9.2, "watch_count": 0},
+        {"title": "Inception", "release_year": 2010, "genres": ["Action", "Sci-Fi"],
+         "cast": ["Leonardo DiCaprio"], "director": "Christopher Nolan",
+         "rating": 8.8, "watch_count": 0},
+        {"title": "Titanic", "release_year": 1997, "genres": ["Romance", "Drama"],
+         "cast": ["Leonardo DiCaprio", "Kate Winslet"], "director": "James Cameron",
+         "rating": 7.8, "watch_count": 0},
+        {"title": "Interstellar", "release_year": 2014, "genres": ["Adventure", "Sci-Fi"],
+         "cast": ["Matthew McConaughey"], "director": "Christopher Nolan",
+         "rating": 8.6, "watch_count": 0},
+        {"title": "The Dark Knight", "release_year": 2008, "genres": ["Action", "Crime"],
+         "cast": ["Christian Bale", "Heath Ledger"], "director": "Christopher Nolan",
+         "rating": 9.0, "watch_count": 0},
     ]
+
+    # Generate and attach embeddings for each movie title
+    for movie in movies:
+        emb = embedding_model.encode(movie["title"]).tolist()
+        movie["embedding"] = emb
+
     res_movies = await movies_col.insert_many(movies)
 
     users = [
@@ -87,8 +115,10 @@ async def seed_data():
     await watch_col.insert_many(watch_events)
 
     reviews = [
-        {"user_id": res_users.inserted_ids[0], "movie_id": res_movies.inserted_ids[0], "rating": 9.0, "text": "Classic masterpiece"},
-        {"user_id": res_users.inserted_ids[1], "movie_id": res_movies.inserted_ids[1], "rating": 8.5, "text": "Mind-bending!"},
+        {"user_id": res_users.inserted_ids[0], "movie_id": res_movies.inserted_ids[0],
+         "rating": 9.0, "text": "Classic masterpiece"},
+        {"user_id": res_users.inserted_ids[1], "movie_id": res_movies.inserted_ids[1],
+         "rating": 8.5, "text": "Mind-bending!"},
     ]
     await reviews_col.insert_many(reviews)
 
@@ -100,22 +130,71 @@ async def seed_data():
     return {"seeded": True}
 
 
-@app.get("/movies/search")
-async def search_movies(query: str = Query(..., min_length=1)):
-    cursor = movies_col.aggregate([
-        {"$match": {"$text": {"$search": query}}},
-        {"$addFields": {"score": {"$meta": "textScore"}}},
-        {"$sort": {"score": -1}},
-        {"$limit": 20}
-    ])
+# ------------------ SEMANTIC SEARCH ------------------
+@app.get("/movies/semantic_search")
+async def semantic_search(query: str = Query(..., min_length=1), top_k: int = 5):
+    movies = await movies_col.find({}, {"title": 1, "rating": 1, "watch_count": 1, "embedding": 1}).to_list(None)
+    if not movies:
+        raise HTTPException(404, "No movies found")
+
+    vectors = np.array([m["embedding"] for m in movies]).astype("float32")
+    index = faiss.IndexFlatL2(vectors.shape[1])
+    index.add(vectors)
+
+    query_emb = embedding_model.encode([query]).astype("float32")
+    distances, indices = index.search(query_emb, top_k)
+
     results = []
-    async for doc in cursor:
-        score = 0.5 * doc["score"] + 0.3 * doc["rating"] + 0.2 * doc["watch_count"]
-        doc["_id"] = str(doc["_id"])
-        doc["final_score"] = score
-        results.append(doc)
-    results.sort(key=lambda x: x["final_score"], reverse=True)
-    return results
+    for i, idx in enumerate(indices[0]):
+        movie = movies[idx]
+        movie["_id"] = str(movie["_id"])
+        movie["similarity_score"] = float(1 / (1 + distances[0][i]))
+        results.append(movie)
+
+    return {"query": query, "results": results}
+
+
+# ------------------ HYBRID SEARCH ------------------
+@app.get("/movies/hybrid_search")
+async def hybrid_search(query: str = Query(..., min_length=1), top_k: int = 5):
+    movies = await movies_col.find({}, {"title": 1, "rating": 1, "watch_count": 1, "embedding": 1}).to_list(None)
+    if not movies:
+        raise HTTPException(404, "No movies found")
+
+    vectors = np.array([m["embedding"] for m in movies]).astype("float32")
+    index = faiss.IndexFlatL2(vectors.shape[1])
+    index.add(vectors)
+
+    query_emb = embedding_model.encode([query]).astype("float32")
+    distances, indices = index.search(query_emb, top_k)
+
+    results = []
+    for i, idx in enumerate(indices[0]):
+        movie = movies[idx]
+        similarity = float(1 / (1 + distances[0][i]))
+        final_score = 0.5 * similarity + 0.3 * movie["rating"] + 0.2 * movie["watch_count"]
+        movie["_id"] = str(movie["_id"])
+        movie["hybrid_score"] = final_score
+        results.append(movie)
+
+    results.sort(key=lambda x: x["hybrid_score"], reverse=True)
+    return {"query": query, "results": results}
+
+
+# ------------------ KEYWORD + FUZZY SEARCH ------------------
+@app.get("/movies/keyword_search")
+async def keyword_search(query: str = Query(..., min_length=1)):
+    regex_pattern = re.compile(f".*{re.escape(query)}.*", re.IGNORECASE)
+    movies = await movies_col.find({"title": {"$regex": regex_pattern}}).to_list(None)
+
+    if not movies:
+        fuzzy_pattern = re.compile(f".*{re.escape(query[:-1])}.*", re.IGNORECASE)
+        movies = await movies_col.find({"title": {"$regex": fuzzy_pattern}}).to_list(None)
+
+    for m in movies:
+        m["_id"] = str(m["_id"])
+
+    return {"query": query, "results": movies}
 
 
 @app.get("/users/{user_id}/history")
