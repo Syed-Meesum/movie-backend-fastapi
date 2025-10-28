@@ -10,7 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
-# ------------------ SETUP ------------------
+
 load_dotenv()
 
 app = FastAPI(title="Movie Streaming Platform API")
@@ -26,10 +26,9 @@ users_col = db.users
 watch_col = db.watch_history
 reviews_col = db.reviews
 
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # lightweight, fast embedding model
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2") 
 
 
-# ------------------ MODELS ------------------
 class Movie(BaseModel):
     title: str
     release_year: int
@@ -63,7 +62,7 @@ class WatchEventIn(BaseModel):
 @app.get("/")
 def show():
     return {"movie-streaming"}
-# ------------------ SEED DATA ------------------
+
 @app.post("/seed")
 async def seed_data():
     await movies_col.delete_many({})
@@ -89,7 +88,7 @@ async def seed_data():
          "rating": 9.0, "watch_count": 0},
     ]
 
-    # Generate and attach embeddings for each movie title
+   
     for movie in movies:
         emb = embedding_model.encode(movie["title"]).tolist()
         movie["embedding"] = emb
@@ -130,7 +129,6 @@ async def seed_data():
     return {"seeded": True}
 
 
-# ------------------ SEMANTIC SEARCH ------------------
 @app.get("/movies/semantic_search")
 async def semantic_search(query: str = Query(..., min_length=1), top_k: int = 5):
     movies = await movies_col.find({}, {"title": 1, "rating": 1, "watch_count": 1, "embedding": 1}).to_list(None)
@@ -154,7 +152,6 @@ async def semantic_search(query: str = Query(..., min_length=1), top_k: int = 5)
     return {"query": query, "results": results}
 
 
-# ------------------ HYBRID SEARCH ------------------
 @app.get("/movies/hybrid_search")
 async def hybrid_search(query: str = Query(..., min_length=1), top_k: int = 5):
     movies = await movies_col.find({}, {"title": 1, "rating": 1, "watch_count": 1, "embedding": 1}).to_list(None)
@@ -181,7 +178,7 @@ async def hybrid_search(query: str = Query(..., min_length=1), top_k: int = 5):
     return {"query": query, "results": results}
 
 
-# ------------------ KEYWORD + FUZZY SEARCH ------------------
+
 @app.get("/movies/keyword_search")
 async def keyword_search(query: str = Query(..., min_length=1)):
     regex_pattern = re.compile(f".*{re.escape(query)}.*", re.IGNORECASE)
@@ -219,6 +216,7 @@ async def get_user_history(user_id: str):
     return {"user": user["name"], "history": history}
 
 
+
 @app.get("/movies/{movie_id}/reviews")
 async def get_reviews(movie_id: str):
     try:
@@ -238,6 +236,7 @@ async def get_reviews(movie_id: str):
             "text": r["text"]
         })
     return {"movie": movie["title"], "reviews": reviews}
+
 
 
 @app.post("/movies/{movie_id}/reviews")
@@ -260,6 +259,7 @@ async def add_review(movie_id: str, review: ReviewIn):
         "text": review.text
     })
     return {"ok": True}
+
 
 
 @app.post("/watch")
